@@ -4,7 +4,7 @@ import math
 import torch
 import torch.nn as nn
 
-# We only LoRA-wrap the Linear layers used in attention & MLP inside the Swin encoder
+# We LoRA-wrap the Linear layers used in attention & MLP inside the Swin encoder
 TARGETS = ("qkv", "proj", "linear1", "linear2")
 
 
@@ -37,8 +37,8 @@ class LoRALinear(nn.Module):
         nn.init.zeros_(self.B)
 
         # mark so we can count them cleanly later
-        self.A._is_lora_param = True  # type: ignore[attr-defined]
-        self.B._is_lora_param = True  # type: ignore[attr-defined]
+        self.A._is_lora_param = True
+        self.B._is_lora_param = True
 
         self.drop = nn.Dropout(dropout) if dropout and dropout > 0 else nn.Identity()
 
@@ -71,11 +71,14 @@ def _inject_lora_linear(
 
 def apply_lora_to_encoder(model, r=8, alpha=16, dropout=0.0):
     """
-    Strict PEFT:
+    LoRA-on-encoder + Full-FT-on-decoder protocol (our agreed baseline):
+
       • Freeze ALL base weights.
       • Inject LoRA ONLY into encoder Linear layers (qkv/proj/linear1/linear2).
-      • Train ONLY LoRA A/B and the final segmentation head ('out.*').
-      • Keep encoder base and decoder base frozen.
+      • Train ONLY LoRA A/B inside the encoder (encoder base stays frozen).
+      • UNFREEZE the entire decoder + seg head => full FT on decoder & head.
+
+    This isolates encoder adaptation (LoRA vs FFT) while keeping decoder capacity identical.
     """
     # 1) Freeze everything
     for p in model.parameters():
@@ -97,9 +100,9 @@ def apply_lora_to_encoder(model, r=8, alpha=16, dropout=0.0):
             for p in m.base.parameters():
                 p.requires_grad_(False)
 
-    # 4) Unfreeze the final segmentation head so classes can adapt
+    # 4) UNFREEZE decoder + output head (everything outside encoder)
     for name, p in model.named_parameters():
-        if name.startswith("out."):
+        if not name.startswith("swinViT."):  # decoder & out head
             p.requires_grad = True
 
     return model
