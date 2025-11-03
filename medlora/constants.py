@@ -54,7 +54,7 @@ SSL_URL = (
     "ssl_pretrained_weights.pth"
 )
 
-# Default path for the downloaded SSL weights. 
+# Default path for the downloaded SSL weights.
 # We should allow users to override this via the MEDLORA_SSL_PATH environment variable.
 # But for colab usage this might suffice?
 SSL_PATH = os.environ.get(
