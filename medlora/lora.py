@@ -4,7 +4,7 @@ import math
 import torch
 import torch.nn as nn
 
-# Target only the Linear layers used in attention & MLP inside the Swin encoder
+# We only LoRA-wrap the Linear layers used in attention & MLP inside the Swin encoder
 TARGETS = ("qkv", "proj", "linear1", "linear2")
 
 
@@ -16,15 +16,16 @@ class LoRALinear(nn.Module):
     """
     def __init__(self, base: nn.Linear, r: int = 8, alpha: int = 16, dropout: float = 0.0):
         super().__init__()
-        assert isinstance(base, nn.Linear)
+        if not isinstance(base, nn.Linear):
+            raise TypeError("LoRALinear expects nn.Linear")
         self.base = base
         self.r = int(r)
         self.alpha = int(alpha)
         self.scaling = self.alpha / max(1, self.r)
 
         in_f, out_f = base.in_features, base.out_features
-        dev  = base.weight.device
-        dt   = base.weight.dtype
+        dev = base.weight.device
+        dt = base.weight.dtype
 
         # LoRA factors on SAME device/dtype as the base Linear
         self.A = nn.Parameter(torch.zeros(self.r, in_f, device=dev, dtype=dt))
@@ -65,14 +66,13 @@ def _inject_lora_linear(module: nn.Module, target_names=TARGETS, r=8, alpha=16, 
 
 def apply_lora_to_encoder(model, r=8, alpha=16, dropout=0.0):
     """
-    Freeze everything; inject LoRA into encoder Linear layers (qkv/proj/linear1/linear2);
-    then unfreeze ONLY:
-      • LoRA A/B tensors in the encoder
-      • final segmentation head ('out.*') so classes can adapt
-
-    Decoder base weights remain frozen for true parameter efficiency.
+    Strict PEFT:
+      • Freeze ALL base weights.
+      • Inject LoRA ONLY into encoder Linear layers (qkv/proj/linear1/linear2).
+      • Train ONLY LoRA A/B and the final segmentation head ('out.*').
+      • Keep encoder base and decoder base frozen.
     """
-    # 1) Freeze all parameters
+    # 1) Freeze everything
     for p in model.parameters():
         p.requires_grad = False
 
@@ -80,13 +80,15 @@ def apply_lora_to_encoder(model, r=8, alpha=16, dropout=0.0):
     n_wrapped = _inject_lora_linear(model.swinViT, TARGETS, r=r, alpha=alpha, dropout=dropout)
     print(f"[LoRA] Wrapped {n_wrapped} Linear layers in encoder (r={r}, alpha={alpha}).")
 
-    # 3) Ensure LoRA A/B are trainable
+    # 3) Enable grads ONLY for LoRA factors (keep wrapped base Linear frozen)
     for m in model.swinViT.modules():
         if isinstance(m, LoRALinear):
-            for p in m.parameters():
-                p.requires_grad = True
+            m.A.requires_grad_(True)
+            m.B.requires_grad_(True)
+            for p in m.base.parameters():
+                p.requires_grad_(False)
 
-    # 4) Unfreeze final segmentation head
+    # 4) Unfreeze the final segmentation head so classes can adapt
     for name, p in model.named_parameters():
         if name.startswith("out."):
             p.requires_grad = True
