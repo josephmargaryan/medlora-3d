@@ -4,13 +4,48 @@
 
 ## Quickstart (Colab)
 ```bash
-pip install -r requirements.txt
-# FIRST RUN ONLY: this downloads MSD tasks on-demand inside the first run
-python main.py \
+%%capture
+!pip install --upgrade pip
+!pip install monai nibabel
+!git clone https://github.com/josephmargaryan/medlora-3d.git
+%cd medlora-3d
+!pip install -e . --no-deps
+  ```
+then 
+```bash
+!python main.py \
   --model swinv1 \
   --dataset Task03_Liver \
-  --method lora \
+  --method fft \
   --train-fraction 20 \
   --seed 0 \
-  --epochs 100 --early-stopping true --patience 10 --min-epochs 30
-  ```
+  --epochs 50 \
+  --early-stopping true \
+  --patience 5 \
+  --min-epochs 10 \
+  --batch-size 2 \
+  --num-workers 2 \
+  --save-preds true \
+  --pred-splits both \
+  --save-nii false \
+  --num-workers 2 \
+  --lora-r 8 \
+  --lora-alpha 16 \
+  --lora-dropout 0.0
+```
+# --model {swinv1|swinv2}
+# --method {lora|fft}
+
+# --dataset Task03_Liver
+#Task01_BrainTumour
+#Task02_Heart
+#Task03_Liver
+#Task04_Hippocampus
+#Task05_Prostate
+#Task06_Lung
+#Task07_Pancreas
+#Task08_HepaticVessel
+#Task09_Spleen
+#Task10_Colon
+
+# --train-fraction 20 \ # 5, 20, 80
