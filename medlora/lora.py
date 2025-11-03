@@ -26,9 +26,12 @@ class LoRALinear(nn.Module):
         self.scaling = self.alpha / max(1, self.r)
 
         in_f, out_f = base.in_features, base.out_features
-        # LoRA factors; zero-init B so wrapper starts as exact identity
-        self.A = nn.Parameter(torch.zeros(self.r, in_f))
-        self.B = nn.Parameter(torch.zeros(out_f, self.r))
+        dev = base.weight.device
+        dt = base.weight.dtype
+
+        # LoRA factors on SAME device/dtype as the base Linear
+        self.A = nn.Parameter(torch.zeros(self.r, in_f, device=dev, dtype=dt))
+        self.B = nn.Parameter(torch.zeros(out_f, self.r, device=dev, dtype=dt))
         nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))
         nn.init.zeros_(self.B)
 

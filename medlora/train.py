@@ -10,6 +10,7 @@ from monai.losses import DiceCELoss
 
 
 def build_losses_and_metrics():
+    # Industry-standard choice for med-seg: Dice + CE with softmax + one-hot targets
     loss_fn = DiceCELoss(to_onehot_y=True, softmax=True)
     return loss_fn
 
@@ -56,13 +57,13 @@ def train(
     loaders,
     device,
     roi,
-    max_epochs=100,
-    lr=1e-4,
-    wd=1e-4,
-    early_stopping=True,
-    patience=10,
-    min_epochs=10,
-    tag="run",
+    max_epochs: int = 100,
+    lr: float = 1e-4,
+    wd: float = 1e-4,
+    early_stopping: bool = True,
+    patience: int = 10,
+    min_epochs: int = 10,
+    tag: str = "run",
 ):
     train_loader, val_loader, train_eval_loader = loaders
     loss_fn = build_losses_and_metrics()
@@ -71,7 +72,8 @@ def train(
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=wd
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+
+    scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
 
     best_state, best_dice, best_counter = None, -1.0, 0
     tr_losses, va_losses, va_dices = [], [], []
@@ -88,8 +90,9 @@ def train(
             labels = batch["label"].to(device)
 
             optimizer.zero_grad(set_to_none=True)
+
             ctx = (
-                torch.amp.autocast(device_type="cuda", dtype=torch.float16)
+                torch.amp.autocast("cuda", dtype=torch.float16)
                 if device.type == "cuda"
                 else contextlib.nullcontext()
             )
@@ -97,9 +100,13 @@ def train(
                 logits = model(images)
                 loss = loss_fn(logits, labels)
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
             running.append(loss.item())
             pbar.set_postfix(loss=f"{np.mean(running):.4f}")
@@ -120,7 +127,8 @@ def train(
         if early_stopping and epoch >= min_epochs and best_counter >= patience:
             break
 
-    tloss_eval, tdice_eval = evaluate(model, train_eval_loader, loss_fn, device, roi)
+    # Train-eval (no aug) for generalization gap
+    _, tdice_eval = evaluate(model, train_eval_loader, loss_fn, device, roi)
 
     if best_state is not None:
         model.load_state_dict(best_state)
