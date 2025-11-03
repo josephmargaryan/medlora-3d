@@ -1,26 +1,33 @@
 # main.py
 from __future__ import annotations
-import argparse, time, json
+
+import argparse
+import csv
+import json
+import time
 from pathlib import Path
+
 import torch
+from monai.apps import DecathlonDataset
 
 from medlora.constants import DEFAULT_ROI, MSD_TASKS
-from medlora.utils import (
-    set_seed,
-    ensure_dir,
-    save_yaml,
-    save_json,
-    plot_curves,
-    count_trainable,
-)
 from medlora.data import build_loaders
-from medlora.models import build_swin_unetr, load_ct_ssl_encoder
 from medlora.lora import apply_lora_to_encoder
+from medlora.models import build_swin_unetr, load_ct_ssl_encoder
 from medlora.train import train
+from medlora.utils import (
+    ensure_dir,
+    param_stats,
+    plot_curves,
+    save_json,
+    save_yaml,
+    set_seed,
+)
 
 
 def parse_args():
     p = argparse.ArgumentParser()
+    # Experiment config
     p.add_argument("--model", choices=["swinv1", "swinv2"], required=True)
     p.add_argument("--dataset", choices=MSD_TASKS, required=True)
     p.add_argument("--method", choices=["fft", "lora"], required=True)
@@ -29,6 +36,7 @@ def parse_args():
     )
     p.add_argument("--seed", type=int, default=0)
 
+    # Training schedule
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument(
         "--early-stopping", type=lambda x: str(x).lower() == "true", default=True
@@ -36,14 +44,14 @@ def parse_args():
     p.add_argument("--patience", type=int, default=5)
     p.add_argument("--min-epochs", type=int, default=10)
 
+    # Loader & paths
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--num-workers", type=int, default=2)
-
     p.add_argument("--data-dir", type=Path, default=Path("/content/data"))
     p.add_argument("--runs-dir", type=Path, default=Path("runs"))
     p.add_argument("--splits-dir", type=Path, default=Path("splits"))
 
-    # method-specific knobs
+    # Optim / method-specific knobs
     p.add_argument("--lr-fft", type=float, default=1e-4)
     p.add_argument("--wd-fft", type=float, default=1e-4)
     p.add_argument("--lr-lora", type=float, default=5e-4)
@@ -51,6 +59,14 @@ def parse_args():
     p.add_argument("--lora-r", type=int, default=8)
     p.add_argument("--lora-alpha", type=int, default=16)
     p.add_argument("--lora-dropout", type=float, default=0.0)
+
+    # Prediction export
+    p.add_argument(
+        "--save-preds", type=lambda x: str(x).lower() == "true", default=False
+    )
+    p.add_argument("--pred-splits", choices=["val", "test", "both"], default="test")
+    p.add_argument("--save-nii", type=lambda x: str(x).lower() == "true", default=False)
+
     return p.parse_args()
 
 
@@ -75,7 +91,7 @@ def run():
     )
     ensure_dir(exp_dir)
 
-    # --- loaders & splits ---
+    # --- loaders & splits (patient-level, fixed val split) ---
     train_loader, val_loader, train_eval_loader, split_dict = build_loaders(
         args.data_dir,
         args.dataset,
@@ -89,9 +105,7 @@ def run():
     with open(split_dir / f"frac{args.train_fraction}_seed{args.seed}.json", "w") as f:
         json.dump(split_dict, f, indent=2)
 
-    # --- robust channels from MSD metadata ---
-    from monai.apps import DecathlonDataset
-
+    # --- channels / classes from MSD metadata ---
     props = DecathlonDataset(
         root_dir=str(args.data_dir),
         task=args.dataset,
@@ -119,15 +133,21 @@ def run():
         tag = (
             f"{args.dataset}|{args.model}|fft|frac{args.train_fraction}|seed{args.seed}"
         )
-    else:
+    else:  # LoRA strict-PEFT: encoder Linear layers only + seg head
         model = apply_lora_to_encoder(
             model, r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout
         )
         lr, wd = args.lr_lora, args.wd_lora
         tag = f"{args.dataset}|{args.model}|lora(r={args.lora_r},a={args.lora_alpha})|frac{args.train_fraction}|seed{args.seed}"
 
-    n_params = count_trainable(model)
-    print(f"Trainable params: {n_params/1e6:.3f}M")
+    # parameter breakdown (for auditing)
+    stats = param_stats(model)
+    print(
+        "Param stats | total: "
+        f"{stats['total']/1e6:.3f}M | trainable: {stats['trainable']/1e6:.3f}M | "
+        f"lora: {stats['lora']/1e6:.3f}M | head: {stats['head']/1e6:.3f}M | "
+        f"decoder_base: {stats['decoder_base']/1e6:.3f}M | encoder_base: {stats['encoder_base']/1e6:.3f}M"
+    )
 
     # --- train ---
     start = time.time()
@@ -153,14 +173,17 @@ def run():
         "best_val_dice": logs["best_val_dice"],
         "train_eval_dice": logs["train_eval_dice"],
         "generalization_gap": logs["train_eval_dice"] - logs["best_val_dice"],
-        "trainable_params": n_params,
         "ssl_loaded_encoder_tensors": int(loaded),
         "wall_clock_sec": wall,
+        # parameter stats
+        "params_total": stats["total"],
+        "params_trainable_total": stats["trainable"],
+        "params_trainable_lora": stats["lora"],
+        "params_trainable_head": stats["head"],
+        "params_trainable_decoder_base": stats["decoder_base"],
+        "params_trainable_encoder_base": stats["encoder_base"],
     }
     save_json(final, exp_dir / "final_metrics.json")
-
-    # curves + csv
-    import csv
 
     with open(exp_dir / "metrics.csv", "w", newline="") as f:
         w = csv.writer(f)
@@ -170,6 +193,23 @@ def run():
         ):
             w.writerow([i, tl, vl, vd])
     plot_curves(logs["train_losses"], logs["val_losses"], logs["val_dices"], exp_dir)
+
+    # --- optional predictions export (val/test) ---
+    if args.save_preds:
+        from medlora.predict import save_predictions
+
+        save_predictions(
+            model=model,
+            data_dir=args.data_dir,
+            task=args.dataset,
+            split_dict=split_dict,
+            outdir=exp_dir,
+            device=device,
+            which=args.pred_splits,
+            save_nii=args.save_nii,
+            roi_size=DEFAULT_ROI,
+        )
+
     print("Done:", exp_dir)
 
 

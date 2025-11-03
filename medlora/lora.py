@@ -14,7 +14,10 @@ class LoRALinear(nn.Module):
         y = W x + (alpha/r) * B(A x)
     Base (W, b) are frozen; only A, B are trainable. Forward signature unchanged.
     """
-    def __init__(self, base: nn.Linear, r: int = 8, alpha: int = 16, dropout: float = 0.0):
+
+    def __init__(
+        self, base: nn.Linear, r: int = 8, alpha: int = 16, dropout: float = 0.0
+    ):
         super().__init__()
         if not isinstance(base, nn.Linear):
             raise TypeError("LoRALinear expects nn.Linear")
@@ -49,7 +52,9 @@ class LoRALinear(nn.Module):
         return y + self.scaling * dx
 
 
-def _inject_lora_linear(module: nn.Module, target_names=TARGETS, r=8, alpha=16, dropout=0.0) -> int:
+def _inject_lora_linear(
+    module: nn.Module, target_names=TARGETS, r=8, alpha=16, dropout=0.0
+) -> int:
     """
     Recursively replace nn.Linear children whose attribute name contains any of target_names.
     Returns count of layers wrapped.
@@ -77,8 +82,12 @@ def apply_lora_to_encoder(model, r=8, alpha=16, dropout=0.0):
         p.requires_grad = False
 
     # 2) Inject LoRA into the Swin encoder only
-    n_wrapped = _inject_lora_linear(model.swinViT, TARGETS, r=r, alpha=alpha, dropout=dropout)
-    print(f"[LoRA] Wrapped {n_wrapped} Linear layers in encoder (r={r}, alpha={alpha}).")
+    n_wrapped = _inject_lora_linear(
+        model.swinViT, TARGETS, r=r, alpha=alpha, dropout=dropout
+    )
+    print(
+        f"[LoRA] Wrapped {n_wrapped} Linear layers in encoder (r={r}, alpha={alpha})."
+    )
 
     # 3) Enable grads ONLY for LoRA factors (keep wrapped base Linear frozen)
     for m in model.swinViT.modules():
