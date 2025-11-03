@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import numpy as np
-import torch  # <-- needed for pin_memory check
+import torch
 from monai.apps import DecathlonDataset
 from monai.data import Dataset, DataLoader
 from monai.transforms import (
@@ -17,7 +17,8 @@ from monai.transforms import (
     RandCropByPosNegLabeld,
     RandFlipd,
     RandRotate90d,
-    EnsureTyped,
+    SpatialPadd,
+    EnsureTyped,  # <-- added SpatialPadd
 )
 from .constants import CT_TASKS, DEFAULT_ROI, DEFAULT_VAL_FRAC
 
@@ -46,8 +47,10 @@ def make_transforms(task: str, roi=DEFAULT_ROI, aug=True):
         if is_ct(task)
         else [NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True)]
     )
+
     if aug:
         extra = [
+            # allow smaller crops if volume < ROI in any dim; then pad to ROI
             RandCropByPosNegLabeld(
                 keys=["image", "label"],
                 label_key="label",
@@ -55,13 +58,17 @@ def make_transforms(task: str, roi=DEFAULT_ROI, aug=True):
                 pos=1,
                 neg=1,
                 num_samples=1,
+                allow_smaller=True,
             ),
+            SpatialPadd(keys=["image", "label"], spatial_size=roi),
             RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=(0, 1, 2)),
             RandRotate90d(keys=["image", "label"], prob=0.5, max_k=3),
             EnsureTyped(keys=["image", "label"]),
         ]
     else:
+        # no aug for eval; keep native size (SlidingWindowInferer can handle padding internally)
         extra = [EnsureTyped(keys=["image", "label"])]
+
     return Compose(base + norm + extra)
 
 
