@@ -71,9 +71,8 @@ def plot_curves(train_losses, val_losses, val_dices, outdir: Path):
 
 def _is_lora_param(name: str, p: torch.Tensor) -> bool:
     """
-    Heuristics to count PEFT LoRA params:
-    - PEFT names usually contain 'lora_A' / 'lora_B' (or 'lora_' prefix).
-    - Keep compatibility with any custom marker set earlier.
+    PEFT LoRA parameters typically contain 'lora_' (e.g., lora_A/lora_B).
+    Keep compatibility with any custom markers if present.
     """
     return ("lora_" in name) or getattr(p, "_is_lora_param", False)
 
