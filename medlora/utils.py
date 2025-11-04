@@ -69,15 +69,24 @@ def plot_curves(train_losses, val_losses, val_dices, outdir: Path):
     plt.close()
 
 
+def _is_lora_param(name: str, p: torch.Tensor) -> bool:
+    """
+    Heuristics to count PEFT LoRA params:
+    - PEFT names usually contain 'lora_A' / 'lora_B' (or 'lora_' prefix).
+    - Keep compatibility with any custom marker set earlier.
+    """
+    return ("lora_" in name) or getattr(p, "_is_lora_param", False)
+
+
 def param_stats(model):
-    """Return a breakdown of trainable parameters by category."""
+    """Return a breakdown of trainable parameters by category (PEFT-aware)."""
     stats = dict(total=0, trainable=0, lora=0, encoder_base=0, decoder_base=0, head=0)
     for name, p in model.named_parameters():
         n = p.numel()
         stats["total"] += n
         if p.requires_grad:
             stats["trainable"] += n
-            if getattr(p, "_is_lora_param", False):
+            if _is_lora_param(name, p):
                 stats["lora"] += n
             elif name.startswith("swinViT."):
                 stats["encoder_base"] += n

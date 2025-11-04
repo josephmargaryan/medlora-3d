@@ -9,10 +9,11 @@ from pathlib import Path
 
 import torch
 from monai.apps import DecathlonDataset
+from peft import PeftModel  # for saving adapter
 
 from medlora.constants import DEFAULT_ROI, MSD_TASKS
 from medlora.data import build_loaders
-from medlora.lora import apply_lora_to_encoder
+from medlora.lora import apply_lora
 from medlora.models import build_swin_unetr, load_ct_ssl_encoder
 from medlora.train import train
 from medlora.utils import (
@@ -58,7 +59,15 @@ def parse_args():
     p.add_argument("--wd-lora", type=float, default=0.0)
     p.add_argument("--lora-r", type=int, default=8)
     p.add_argument("--lora-alpha", type=int, default=16)
-    p.add_argument("--lora-dropout", type=float, default=0.0)
+    p.add_argument("--lora-dropout", type=float, default=0.1)
+
+    # NEW: control head behavior (default: LoRA on head too)
+    p.add_argument(
+        "--lora-keep-head",
+        type=lambda x: str(x).lower() == "true",
+        default=False,
+        help="If true, exclude 'out' head from LoRA and keep it fully trainable.",
+    )
 
     # Prediction export
     p.add_argument(
@@ -130,15 +139,30 @@ def run():
         for p in model.parameters():
             p.requires_grad = True
         lr, wd = args.lr_fft, args.wd_fft
-        tag = (
-            f"{args.dataset}|{args.model}|fft|frac{args.train_fraction}|seed{args.seed}"
-        )
-    else:  # LoRA strict-PEFT: encoder Linear layers only + seg head
-        model = apply_lora_to_encoder(
-            model, r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout
-        )
+        tag = f"{args.dataset}|{args.model}|fft|frac{args.train_fraction}|seed{args.seed}"
+    else:
+        # === PEFT: LoRA on *all* Linear + Conv3d across encoder+decoder (and head by default) ===
+        model = apply_lora(
+            model,
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            keep_head_trainable=args.lora_keep_head,
+            head_prefix="out.",
+        ).to(device)
+
+        # optional: quick PEFT audit
+        try:
+            model.print_trainable_parameters()
+        except Exception:
+            pass
+
         lr, wd = args.lr_lora, args.wd_lora
-        tag = f"{args.dataset}|{args.model}|lora(r={args.lora_r},a={args.lora_alpha})|frac{args.train_fraction}|seed{args.seed}"
+        head_tag = "keep-head" if args.lora_keep_head else "head-lora"
+        tag = (
+            f"{args.dataset}|{args.model}|peft-lora(all Linear+Conv3d,{head_tag})"
+            f"|r={args.lora_r},a={args.lora_alpha}|frac{args.train_fraction}|seed{args.seed}"
+        )
 
     # parameter breakdown (for auditing)
     stats = param_stats(model)
@@ -167,7 +191,16 @@ def run():
     wall = time.time() - start
 
     # --- save artifacts ---
+    # Save the adapter cleanly when using PEFT
+    if isinstance(model, PeftModel):
+        try:
+            model.save_pretrained(exp_dir / "adapter")  # LoRA weights + config
+        except Exception:
+            pass
+
+    # Also save the "best" state dict captured during training (LoRA-only for PEFT).
     torch.save(best_state, exp_dir / "best.ckpt")
+
     save_yaml(vars(args), exp_dir / "config.yaml")
     final = {
         "best_val_dice": logs["best_val_dice"],
@@ -197,7 +230,6 @@ def run():
     # --- optional predictions export (val/test) ---
     if args.save_preds:
         from medlora.predict import save_predictions
-
         save_predictions(
             model=model,
             data_dir=args.data_dir,
